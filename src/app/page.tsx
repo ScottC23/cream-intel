@@ -10,8 +10,8 @@ const ACT_LABELS:Record<string,string>={founder_direct:'Founder direct',first_ou
 const ACT_CLS:Record<string,string>={founder_direct:'act-f',first_outreach_target:'act-1',technical_owner_to_validate:'act-t',executive_sponsor_to_map:'act-s',operational_owner:'act-o',capability_builder:'act-cap',conditional_target:'act-c',compliance_stakeholder:'act-c'}
 
 /* ═══ TYPES ═══ */
-interface ParsedCo{value:string;type:'name'|'ticker';src:string}
-interface ResolvedCo{name:string;track:string;stage:string;cik?:string;ticker?:string;sic?:string;sicDesc?:string;hq?:string;employees?:string;sector?:string;formDFiled?:boolean;formDAmount?:string;investors?:string;dataQuality:number;partial:boolean;resolutionNote:string}
+interface ParsedCo{value:string;type:'name'|'ticker';src:string;url?:string;website?:string}
+interface ResolvedCo{name:string;track:string;stage:string;cik?:string;ticker?:string;sic?:string;sicDesc?:string;hq?:string;employees?:string;sector?:string;website?:string;formDFiled?:boolean;formDAmount?:string;investors?:string;dataQuality:number;partial:boolean;resolutionNote:string}
 interface Signal{theme:string;label:string;rawStrength:number;adjStrength:number;date:string;recencyTier:string;sourceType:string;sourceCount:number;sourceTypes:string[];confidence:string;confidenceCapped:boolean;corroborationBonus:number;excerpt:string}
 interface Score{model:string;dimensions:Record<string,number>;highConfBonus:number;raw:number;stageCap:number;final:number;grade:string;readiness:string;themesHit:string[];freshestDays:number;capped:boolean;scoringRationale:string}
 interface Role{title:string;department:string;priority:string;action:string;actionLabel:string;score:number;whyMatters:string;howToUse:string;evidenceConf:string;evidenceConfNote:string;inferenceRisk:string;inferenceRiskNote:string;inferenceNote?:string;topics:{text:string;tag:string}[];firstQuestion:string}
@@ -40,25 +40,34 @@ async function askJSON<T>(prompt:string,maxT=2000):Promise<T>{
 }
 
 /* ═══ INTELLIGENCE PIPELINE ═══ */
-async function resolveCompany(input:string,type:'name'|'ticker'):Promise<ResolvedCo>{
+async function resolveCompany(input:string,type:'name'|'ticker',url?:string):Promise<ResolvedCo>{
+  const urlContext = url ? `
+Website URL provided: ${url}
+This URL is the PRIMARY anchor for resolution. Use the domain to identify the exact company — do not guess from the name alone.
+Extract the company identity from this specific domain. If the domain clearly identifies the company, prioritise this over any name ambiguity.` : `
+No URL provided. Resolve from name/ticker only — flag ambiguity in resolutionNote if the name could match multiple entities.`
+
   return askJSON<ResolvedCo>(`You are a US company intelligence specialist with deep knowledge of SEC EDGAR, US public markets, and the private company ecosystem including VC-backed companies, Form D filings, and startup intelligence.
 
-Resolve: "${input}" (type: ${type})
+Resolve this company: "${input}" (type: ${type})
+${urlContext}
 
 Return ONLY a JSON object:
-{"name":"official company name","track":"public|private|hybrid","stage":"public|series-b|series-a|seed|private|pe","cik":"SEC CIK with leading zeros or null","ticker":"ticker or null","exchange":"NYSE|NASDAQ|null","sic":"4-digit SIC or null","sicDesc":"SIC description or null","hq":"City, State or null","employees":"e.g. ~5,000 or null","sector":"primary sector","formDFiled":true|false|null,"formDAmount":"e.g. $50m or null","investors":"lead investors or null","dataQuality":0-100,"partial":false,"resolutionNote":"2-3 sentences: what was found, primary business, data caveats"}
+{"name":"official registered company name","track":"public|private|hybrid","stage":"public|series-b|series-a|seed|private|pe","cik":"SEC CIK with leading zeros or null","ticker":"exchange ticker or null","exchange":"NYSE|NASDAQ|null","sic":"4-digit SIC or null","sicDesc":"SIC description or null","hq":"City, State or null","employees":"approximate e.g. ~5,000 or null","sector":"primary sector description","website":"canonical website domain e.g. sidara.com or null","formDFiled":true|false|null,"formDAmount":"most recent raise e.g. $50m or null","investors":"lead investors if known or null","dataQuality":0-100,"partial":false,"resolutionNote":"2-3 sentences: what was found, the company primary business, any ambiguity or data caveats. If a URL was provided confirm whether it matches the resolved entity."}
 
-dataQuality: 90+=rich EDGAR/public history. 70-89=public with some gaps. 50-69=private good press coverage. 30-49=limited signal. <30=very limited.
-hybrid=foreign subsidiary filing with SEC or taken-private company still filing.`)
+dataQuality: 90+=rich EDGAR/public history. 70-89=public with some gaps. 50-69=private with good press coverage. 30-49=limited public signal. <30=very limited.
+hybrid=foreign subsidiary still filing with SEC, or taken-private company.
+IMPORTANT: If the company name is ambiguous and no URL was provided, note this clearly in resolutionNote and set dataQuality lower to reflect uncertainty.`)
 }
 
-async function extractSignals(co:ResolvedCo,themes:string[]):Promise<Signal[]>{
+async function extractSignals(co:ResolvedCo,themes:string[],inputUrl?:string):Promise<Signal[]>{
   const themeDesc:Record<string,string>={data:'Data capability: data infrastructure, platforms, engineering, analytics, data lakes, data mesh, real-time data, MDM',ai:'AI readiness: AI strategy, machine learning, generative AI, LLMs, AI platforms, ML engineering, AI-driven products',automation:'Automation: RPA, manufacturing automation, industrial robots, workflow automation, autonomous systems, IIoT',tom:'Operating model change: restructuring, digital transformation, operating model redesign, workforce change, new leadership, post-merger integration',cyber:'Cyber resilience: cybersecurity investment, security transformation, zero trust, incident response, CISO appointment, SOC',cost:'Cost transformation: cost reduction, opex reduction, efficiency, margin improvement, workforce restructure with capability focus',ops:'Operational improvement: operational excellence, process improvement, supply chain, ERP, digital operations, performance programmes'}
   const selected=themes.map(t=>`- ${t}: ${themeDesc[t]||t}`).join('\n')
   const sigs=await askJSON<{theme:string;label:string;rawStrength:number;date:string;sourceType:string;sourceCount:number;sourceTypes:string[];confidence:string;excerpt:string}[]>(`You are a senior intelligence analyst at a specialist recruitment and BD firm. Your role is to extract enterprise-grade signals about strategic investments, operational changes, and capability gaps — signals that indicate hiring needs and consulting opportunities.
 
 Company: ${co.name} | Track: ${co.track} | Stage: ${co.stage} | Sector: ${co.sector||'Unknown'}
 ${co.cik?`CIK: ${co.cik}`:''}${co.ticker?` | Ticker: ${co.ticker}`:''}
+${co.website?`Website: ${co.website}`:inputUrl?`Input URL: ${inputUrl}`:''}
 Today: 2026-05-01
 
 Extract signals across these themes:
@@ -193,9 +202,9 @@ export default function App(){
     for(const co of init){
       try{
         updateCo(co.id,{status:'resolving'})
-        const resolved=await resolveCompany(co.input.value,co.input.type)
+        const resolved=await resolveCompany(co.input.value,co.input.type,co.input.url)
         updateCo(co.id,{resolved,status:'extracting'})
-        const sigs=await extractSignals(resolved,themes)
+        const sigs=await extractSignals(resolved,themes,co.input.url)
         updateCo(co.id,{signals:sigs,status:'scoring'})
         const sc=await scoreCompany(resolved,sigs)
         updateCo(co.id,{score:sc,status:'done'})
@@ -275,11 +284,47 @@ export default function App(){
 
 /* ═══ F01 SCAN ═══ */
 function ScanView({onScan,hasScan,scanId,companies}:{onScan:(cos:ParsedCo[],themes:string[])=>void;hasScan:boolean;scanId:string|null;companies:ScannedCo[]}){
-  const [name,setName]=useState('');const [ticker,setTicker]=useState('');const [list,setList]=useState('')
+  // Structured entries: name + optional URL
+  const [entries,setEntries]=useState<{name:string;url:string}[]>([{name:'',url:''}])
+  const [list,setList]=useState('')
   const [themes,setThemes]=useState<Set<string>>(new Set());const [sam,setSam]=useState(false)
   const [errs,setErrs]=useState<{co?:string;th?:string}>({});const [scanning,setScanning]=useState(false)
-  const cos2=useCallback(():ParsedCo[]=>{const out:ParsedCo[]=[],seen=new Set<string>();if(name.trim()){seen.add(name.trim().toLowerCase());out.push({value:name.trim(),type:'name',src:'name'})}if(ticker.trim()){const up=ticker.trim().toUpperCase();if(TICKER_RE.test(up)&&!seen.has(up.toLowerCase())){seen.add(up.toLowerCase());out.push({value:up,type:'ticker',src:'ticker'})}}for(const c of parseList(list)){if(!seen.has(c.value.toLowerCase())){seen.add(c.value.toLowerCase());out.push(c)}}return out},[name,ticker,list])
-  const removeCo=(idx:number)=>{const cos=cos2(),rem=cos[idx];if(rem.src==='name')setName('');else if(rem.src==='ticker')setTicker('');else setList(list.split(/[\n\r]+/).filter(l=>{const clean=l.replace(/^\s*\d+[\.\)\-\:]\s*/,'').replace(/["""'']/g,'').trim();return clean.toLowerCase()!==rem.value.toLowerCase()}).join('\n'))}
+  const [inputMode,setInputMode]=useState<'structured'|'paste'>('structured')
+
+  const addEntry=()=>setEntries(e=>[...e,{name:'',url:''}])
+  const removeEntry=(i:number)=>setEntries(e=>e.filter((_,j)=>j!==i))
+  const updateEntry=(i:number,field:'name'|'url',val:string)=>setEntries(e=>e.map((en,j)=>j===i?{...en,[field]:val}:en))
+
+  const cos2=useCallback(():ParsedCo[]=>{
+    const out:ParsedCo[]=[],seen=new Set<string>()
+    if(inputMode==='structured'){
+      for(const en of entries){
+        const n=en.name.trim()
+        if(!n)continue
+        const key=n.toLowerCase()
+        if(seen.has(key))continue
+        seen.add(key)
+        const up=n.toUpperCase()
+        const isT=TICKER_RE.test(up)
+        // Extract clean domain from URL
+        let cleanUrl:string|undefined=undefined
+        if(en.url.trim()){
+          try{
+            const raw=en.url.trim()
+            const withProto=raw.startsWith('http')?raw:'https://'+raw
+            cleanUrl=new URL(withProto).hostname.replace(/^www\./,'')
+          }catch{cleanUrl=en.url.trim().replace(/^https?:\/\//,'').replace(/^www\./,'').split('/')[0]}
+        }
+        out.push({value:isT?up:n,type:isT?'ticker':'name',src:'structured',url:cleanUrl,website:cleanUrl})
+      }
+    } else {
+      for(const c of parseList(list)){
+        if(!seen.has(c.value.toLowerCase())){seen.add(c.value.toLowerCase());out.push(c)}
+      }
+    }
+    return out
+  },[entries,list,inputMode])
+
   const validate=()=>{const e:{co?:string;th?:string}={};if(cos2().length===0)e.co='Add at least one company.';if(themes.size===0)e.th='Select at least one theme.';setErrs(e);return!e.co&&!e.th}
   const handleCreate=async()=>{if(!validate())return;setScanning(true);await onScan(cos2(),Array.from(themes));setScanning(false)}
   const cos=cos2()
@@ -310,21 +355,50 @@ function ScanView({onScan,hasScan,scanId,companies}:{onScan:(cos:ParsedCo[],them
   return(
     <div className="card">
       <div className="csect">
-        <div className="slbl">Company input</div>
-        <div className="row2">
-          <div className="fwrap"><label className="flbl">Company name</label><input type="text" placeholder="e.g. Terabase Energy" value={name} onChange={e=>{setName(e.target.value);setErrs(v=>({...v,co:undefined}))}} className={errs.co?'err-i':''}/></div>
-          <div className="fwrap"><label className="flbl">Ticker symbol</label><input type="text" placeholder="e.g. LECO" value={ticker} onChange={e=>{setTicker(e.target.value.toUpperCase());setErrs(v=>({...v,co:undefined}))}} className={errs.co?'err-i':''}/></div>
+        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:14}}>
+          <div className="slbl" style={{marginBottom:0}}>Company input</div>
+          <div style={{display:'flex',gap:2,background:'var(--cream-200)',borderRadius:'var(--r-sm)',padding:2}}>
+            <button onClick={()=>setInputMode('structured')} style={{fontSize:11,padding:'4px 10px',borderRadius:'var(--r-xs)',border:'none',cursor:'pointer',background:inputMode==='structured'?'var(--cream-50)':'transparent',color:inputMode==='structured'?'var(--teal-800)':'var(--teal-400)',fontFamily:'var(--f-sans)',fontWeight:inputMode==='structured'?500:400,transition:'all .1s'}}>Add by name + URL</button>
+            <button onClick={()=>setInputMode('paste')} style={{fontSize:11,padding:'4px 10px',borderRadius:'var(--r-xs)',border:'none',cursor:'pointer',background:inputMode==='paste'?'var(--cream-50)':'transparent',color:inputMode==='paste'?'var(--teal-800)':'var(--teal-400)',fontFamily:'var(--f-sans)',fontWeight:inputMode==='paste'?500:400,transition:'all .1s'}}>Paste list</button>
+          </div>
         </div>
-        <div className="fwrap">
-          <label className="flbl">Company list</label>
-          <textarea placeholder={'Paste any format — numbered lists, tabs, commas, or one per line.\n\n1. Terabase Energy\n2. Lincoln Electric\n3. CBRE\n4. Generate Biomedicines\n5. TetraScience\n6. Boehringer Ingelheim USA'} value={list} onChange={e=>{setList(e.target.value);setErrs(v=>({...v,co:undefined}))}} className={errs.co?'err-i':''} rows={7}/>
-          <span className="fhint">Accepts company names, tickers, numbered lists, tabs, commas, and mixed formats. Up to 20 companies. Each takes ~20–30 seconds — the system uses Claude to research each company in real time.</span>
-        </div>
-        {errs.co&&<div className="err-msg">{errs.co}</div>}
-        {cos.length>0&&(
+
+        {inputMode==='structured'&&(
+          <div>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 28px',gap:'6px 8px',marginBottom:6}}>
+              <div style={{fontSize:10,fontWeight:500,color:'var(--teal-400)',textTransform:'uppercase',letterSpacing:'.1em'}}>Company name</div>
+              <div style={{fontSize:10,fontWeight:500,color:'var(--teal-400)',textTransform:'uppercase',letterSpacing:'.1em'}}>Website URL <span style={{color:'var(--camel-500)',fontWeight:400}}>(recommended)</span></div>
+              <div/>
+            </div>
+            {entries.map((en,i)=>(
+              <div key={i} style={{display:'grid',gridTemplateColumns:'1fr 1fr 28px',gap:'6px 8px',marginBottom:6}}>
+                <input type="text" placeholder="e.g. Sidara" value={en.name}
+                  onChange={e=>{updateEntry(i,'name',e.target.value);setErrs(v=>({...v,co:undefined}))}}
+                  className={errs.co&&!en.name.trim()?'err-i':''} style={{fontSize:13}}/>
+                <input type="text" placeholder="e.g. sidara.com" value={en.url}
+                  onChange={e=>updateEntry(i,'url',e.target.value)}
+                  style={{fontSize:13}}/>
+                <button onClick={()=>removeEntry(i)} style={{width:28,height:36,display:'flex',alignItems:'center',justifyContent:'center',background:'none',border:'1px solid var(--cream-300)',borderRadius:'var(--r-sm)',cursor:'pointer',color:'var(--teal-400)',fontSize:15,flexShrink:0}} disabled={entries.length===1}>×</button>
+              </div>
+            ))}
+            <button onClick={addEntry} style={{marginTop:4,fontSize:11,color:'var(--camel-500)',background:'none',border:'1px dashed var(--camel-300)',borderRadius:'var(--r-md)',padding:'6px 14px',cursor:'pointer',fontFamily:'var(--f-sans)',width:'100%',transition:'all .1s'}}>+ add another company</button>
+            <div style={{marginTop:8,fontSize:11,color:'var(--teal-400)',fontStyle:'italic'}}>The website URL pins the resolution to the exact company — recommended for private, international, or ambiguously-named companies.</div>
+          </div>
+        )}
+
+        {inputMode==='paste'&&(
+          <div className="fwrap">
+            <textarea placeholder={'Paste any format — numbered lists, tabs, commas, or one per line.\n\n1. Terabase Energy\n2. Lincoln Electric\n3. CBRE\n4. Generate Biomedicines\n5. TetraScience'} value={list} onChange={e=>{setList(e.target.value);setErrs(v=>({...v,co:undefined}))}} className={errs.co?'err-i':''} rows={8}/>
+            <span className="fhint">Names and tickers only in paste mode. Switch to "Add by name + URL" for more accurate resolution of ambiguous or private companies.</span>
+          </div>
+        )}
+
+        {errs.co&&<div className="err-msg" style={{marginTop:8}}>{errs.co}</div>}
+
+        {cos.length>0&&inputMode==='paste'&&(
           <div className="pbox">
-            <div className="phd"><span className="pct">{cos.length} {cos.length===1?'company':'companies'} parsed</span><button className="clr" onClick={()=>{setName('');setTicker('');setList('')}}>clear all</button></div>
-            <div className="tags">{cos.map((c,i)=><span key={i} className="ctag"><span className="ttype">{c.type}</span>{c.value}<button className="tx" onClick={()=>removeCo(i)}>×</button></span>)}</div>
+            <div className="phd"><span className="pct">{cos.length} {cos.length===1?'company':'companies'} parsed</span><button className="clr" onClick={()=>setList('')}>clear all</button></div>
+            <div className="tags">{cos.map((c,i)=><span key={i} className="ctag"><span className="ttype">{c.type}</span>{c.value}</span>)}</div>
           </div>
         )}
       </div>
@@ -369,7 +443,7 @@ function CompaniesView({companies,hasScan}:{companies:ScannedCo[];hasScan:boolea
   const done=companies.filter(c=>c.status==='done').length
   return(
     <div style={{maxWidth:700}}>
-      {done<companies.length&&<div style={{background:'var(--amber-bg)',border:'1px solid rgba(122,92,26,.2)',borderRadius:'var(--r-md)',padding:'10px 15px',marginBottom:14,fontSize:12,color:'var(--amber)',fontStyle:'italic'}}>Researching {companies.length-done} of {companies.length} companies in real time…<div className="progwrap" style={{marginTop:8}}><div className="progfill" style={{width:`${companies.length>0?Math.round(done/companies.length*100):0}%`}}/></div></div>}
+      {done<companies.length&&<div className="info-amber">Researching {companies.length-done} of {companies.length} companies in real time…<div className="progwrap" style={{marginTop:8}}><div className="progfill" style={{width:`${companies.length>0?Math.round(done/companies.length*100):0}%`}}/></div></div>}
       <div style={{display:'flex',gap:10,marginBottom:16,flexWrap:'wrap'}}>
         {(['public','private','hybrid'] as const).map(t=>{const ct=companies.filter(c=>c.resolved?.track===t).length;return ct>0&&<Stat key={t} label={t} val={ct}/>})}
       </div>
@@ -392,17 +466,17 @@ function CompaniesView({companies,hasScan}:{companies:ScannedCo[];hasScan:boolea
                 {r&&<span className="chv" style={{transform:isXp?'rotate(90deg)':'none',transition:'transform .15s'}}>▶</span>}
               </div>
               {isXp&&r&&(
-                <div style={{background:'var(--camel-100)',border:'1px solid var(--camel-300)',borderTop:'none',borderRadius:'0 0 var(--r-md) var(--r-md)',padding:'13px 16px',marginBottom:2}}>
-                  <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginBottom:10}}>
-                    {[['Track',r.track],['Stage',r.stage],r.cik?['CIK',r.cik]:null,r.ticker?['Ticker',r.ticker]:null,r.sic?['SIC',`${r.sic}${r.sicDesc?` · ${r.sicDesc}`:''}`]:null,r.hq?['HQ',r.hq]:null,r.employees?['Employees',r.employees]:null,r.formDAmount?['Form D',r.formDAmount]:null,r.investors?['Investors',r.investors]:null,['Data quality',`${r.dataQuality} / 100`]].filter((x):x is [string,string]=>Array.isArray(x)).map(([k,v],i)=>(
-                      <div key={i} style={{background:'var(--cream-50)',border:'1px solid var(--cream-200)',borderRadius:'var(--r-sm)',padding:'7px 10px'}}>
-                        <div style={{fontSize:9,textTransform:'uppercase',letterSpacing:'.12em',color:'var(--teal-400)',marginBottom:2}}>{k}</div>
-                        <div style={{fontSize:12,color:'var(--teal-800)',fontFamily:k==='CIK'||k==='Ticker'?'var(--f-mono)':'var(--f-sans)'}}>{v}</div>
+                <div className="crow-detail">
+                  <div className="detail-grid">
+                    {[['Track',r.track],['Stage',r.stage],r.cik?['CIK',r.cik]:null,r.ticker?['Ticker',r.ticker]:null,r.sic?['SIC',`${r.sic}${r.sicDesc?` · ${r.sicDesc}`:''}`]:null,r.hq?['HQ',r.hq]:null,r.employees?['Employees',r.employees]:null,r.website?['Website',r.website]:null,r.formDAmount?['Form D',r.formDAmount]:null,r.investors?['Investors',r.investors]:null,['Data quality',`${r.dataQuality} / 100`]].filter((x):x is [string,string]=>Array.isArray(x)).map(([k,v],i)=>(
+                      <div key={i} className="detail-cell">
+                        <div className="detail-key">{k}</div>
+                        <div className="detail-val" style={{fontFamily:k==='CIK'||k==='Ticker'?'var(--f-mono)':'var(--f-sans)'}}>{v}</div>
                       </div>
                     ))}
                   </div>
-                  <div style={{fontSize:11,color:'var(--teal-600)',fontStyle:'italic',lineHeight:1.5}}>{r.resolutionNote}</div>
-                  {sc&&<div style={{marginTop:8,fontSize:11,color:'var(--teal-500)',fontStyle:'italic',lineHeight:1.5}}>{sc.scoringRationale}</div>}
+                  <div className="detail-note">{r.resolutionNote}</div>
+                  {sc&&<div className="detail-rationale">{sc.scoringRationale}</div>}
                 </div>
               )}
             </div>
@@ -425,7 +499,7 @@ function EvidenceView({companies,hasScan}:{companies:ScannedCo[];hasScan:boolean
   const PRIVL:{[k:string]:string}={regulatory:'Regulatory and legal',technical:'Technical and scientific',operational:'Operational momentum',market:'Market and capital',founder:'Founder and leadership'}
   return(
     <div style={{maxWidth:700}}>
-      {done.length<companies.length&&<div style={{background:'var(--amber-bg)',border:'1px solid rgba(122,92,26,.2)',borderRadius:'var(--r-md)',padding:'10px 15px',marginBottom:14,fontSize:12,color:'var(--amber)',fontStyle:'italic'}}>{companies.length-done.length} companies still being researched.</div>}
+      {done.length<companies.length&&<div className="info-amber">{companies.length-done.length} companies still being researched.</div>}
       <div style={{display:'flex',gap:10,marginBottom:16,flexWrap:'wrap'}}>
         {['Outreach ready','Outreach with caveats','Watch list'].map(r=>{const ct=done.filter(c=>c.score?.readiness===r).length;return ct>0&&<Stat key={r} label={r} val={ct}/>})}
       </div>
@@ -456,9 +530,9 @@ function EvidenceView({companies,hasScan}:{companies:ScannedCo[];hasScan:boolean
                 <span className="chv" style={{transform:isXp?'rotate(90deg)':'none',transition:'transform .15s'}}>▶</span>
               </div>
               {isXp&&(
-                <div style={{background:'var(--camel-100)',border:'1px solid var(--camel-300)',borderTop:'none',borderRadius:'0 0 var(--r-md) var(--r-md)',padding:'14px 16px',marginBottom:2}}>
+                <div className="crow-detail">
                   {sc.capped&&<div className="inf-note">Stage cap applied: raw {sc.raw} → final {sc.final} ({co.resolved?.stage} stage).</div>}
-                  <div style={{fontSize:11,color:'var(--teal-600)',fontStyle:'italic',lineHeight:1.5,marginBottom:10}}>{sc.scoringRationale}</div>
+                  <div style={{fontSize:11,color:'rgba(248,242,232,.5)',fontStyle:'italic',lineHeight:1.5,marginBottom:10}}>{sc.scoringRationale}</div>
                   <div className="calcbox">
                     {Object.entries(W).map(([k,w])=><div key={k} className="calcrow"><span className="calk">{(LBLS as Record<string,string>)[k]||k} ({Math.round(w*100)}%)</span><span className="calv">{sc.dimensions[k]||0} × {w} = {Math.round((sc.dimensions[k]||0)*w)}</span></div>)}
                     <div className="calcrow"><span className="calk">high confidence bonus</span><span className="calv">+{sc.highConfBonus} → raw {sc.raw} → final {sc.final}</span></div>
