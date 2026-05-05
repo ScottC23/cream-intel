@@ -27,11 +27,28 @@ function confCls(c:string){return({high:'ch',medium:'cm',low:'cl'} as Record<str
 function parseList(raw:string):ParsedCo[]{const out:ParsedCo[]=[],seen=new Set<string>();for(const line of raw.split(/[\n\r]+/)){for(let p of line.split(/[\t,]+/)){p=p.replace(/^\s*\d+[\.\)\-\:]\s*/,'').replace(/["""'']/g,'').trim();if(!p||p.length<2)continue;const key=p.toLowerCase();if(seen.has(key))continue;seen.add(key);const up=p.toUpperCase();out.push({value:TICKER_RE.test(up)?up:p,type:TICKER_RE.test(up)?'ticker':'name',src:'list'})}}return out}
 
 /* ═══ CLAUDE API ═══ */
-async function ask(prompt:string,maxT=2000):Promise<string>{
-  const r=await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({messages:[{role:'user',content:prompt}],max_tokens:maxT})})
-  if(!r.ok)throw new Error(`API ${r.status}`)
-  const d=await r.json()
-  return d.content.filter((b:{type:string})=>b.type==='text').map((b:{text:string})=>b.text).join('')
+const sleep=(ms:number)=>new Promise(r=>setTimeout(r,ms))
+
+async function ask(prompt:string,maxT=2000,retries=3):Promise<string>{
+  for(let attempt=0;attempt<=retries;attempt++){
+    try{
+      const r=await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({messages:[{role:'user',content:prompt}],max_tokens:maxT})})
+      if(r.status===429){
+        // Rate limited — wait with exponential backoff then retry
+        const wait=[8000,16000,32000][attempt]||32000
+        console.warn(`Rate limited (429), waiting ${wait/1000}s before retry ${attempt+1}/${retries}`)
+        await sleep(wait)
+        continue
+      }
+      if(!r.ok)throw new Error(`API ${r.status}`)
+      const d=await r.json()
+      return d.content.filter((b:{type:string})=>b.type==='text').map((b:{text:string})=>b.text).join('')
+    }catch(e){
+      if(attempt===retries)throw e
+      await sleep(4000)
+    }
+  }
+  throw new Error('Max retries exceeded')
 }
 async function askJSON<T>(prompt:string,maxT=2000):Promise<T>{
   const txt=await ask(prompt,maxT)
@@ -40,23 +57,32 @@ async function askJSON<T>(prompt:string,maxT=2000):Promise<T>{
 }
 
 // Web search — calls API with search tool enabled, extracts all text from response
-async function askWithSearch(prompt:string,maxT=3000):Promise<string>{
-  const r=await fetch('/api/generate',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({messages:[{role:'user',content:prompt}],max_tokens:maxT,use_web_search:true})
-  })
-  if(!r.ok)throw new Error(`Search API ${r.status}`)
-  const d=await r.json()
-  // Extract text from all content blocks (text + tool results)
-  const parts:string[]=[]
-  for(const b of (d.content||[])){
-    if(b.type==='text'&&b.text)parts.push(b.text)
-    if(b.type==='tool_result'){
-      for(const c of (b.content||[])){if(c.type==='text'&&c.text)parts.push(c.text)}
+async function askWithSearch(prompt:string,maxT=3000,retries=3):Promise<string>{
+  for(let attempt=0;attempt<=retries;attempt++){
+    const r=await fetch('/api/generate',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({messages:[{role:'user',content:prompt}],max_tokens:maxT,use_web_search:true})
+    })
+    if(r.status===429){
+      const wait=[10000,20000,40000][attempt]||40000
+      console.warn(`Search rate limited (429), waiting ${wait/1000}s`)
+      await sleep(wait)
+      continue
     }
+    if(!r.ok)throw new Error(`Search API ${r.status}`)
+    const d=await r.json()
+    // Extract text from all content blocks (text + tool results)
+    const parts:string[]=[]
+    for(const b of (d.content||[])){
+      if(b.type==='text'&&b.text)parts.push(b.text)
+      if(b.type==='tool_result'){
+        for(const c of (b.content||[])){if(c.type==='text'&&c.text)parts.push(c.text)}
+      }
+    }
+    return parts.join('\n\n')
   }
-  return parts.join('\n\n')
+  throw new Error('Max retries exceeded')
 }
 
 // Research a company using live web search — runs multiple targeted searches
@@ -73,28 +99,55 @@ async function researchCompany(co:ResolvedCo,themes:string[],inputUrl?:string):P
     ops:'operational improvement supply chain ERP performance',
   }[t]||t)).join(' OR ')
 
-  const searchPrompt=`You are a company intelligence researcher. Search for recent news, developments, and signals about this company from the last 30-60 days.
+  // Sector-specific search angles produce richer signal than generic queries
+  const sectorSearchAngles:{[k:string]:string[]} = {
+    'data center':     ['expansion capacity megawatts','hyperscale colocation','campus build','leasing activity','power infrastructure'],
+    'data centre':     ['expansion capacity megawatts','hyperscale colocation','campus build','leasing activity','power infrastructure'],
+    'cloud':           ['cloud platform investment','infrastructure build','data engineering','AI workload','migration programme'],
+    'pharmaceutical':  ['pipeline FDA approval','clinical trial','manufacturing investment','digital health AI'],
+    'real estate':     ['acquisition development','portfolio expansion','technology investment','sustainability ESG'],
+    'financial':       ['digital transformation','data platform','regulatory compliance','AI risk','fintech investment'],
+    'energy':          ['renewable transition','grid investment','digital operations','sustainability programme'],
+    'manufacturing':   ['automation robotics','Industry 4.0','supply chain','operational excellence','ERP SAP'],
+    'technology':      ['product launch','engineering hiring','AI platform','cloud infrastructure','technical leadership'],
+    'healthcare':      ['digital health','AI diagnostics','data interoperability','HIMSS','Epic Cerner'],
+    'logistics':       ['automation warehouse','last mile','digital supply chain','fleet technology'],
+  }
+  const sector=(co.sector||'').toLowerCase()
+  const sectorKey=Object.keys(sectorSearchAngles).find(k=>sector.includes(k))||''
+  const sectorAngles=sectorSearchAngles[sectorKey]||['technology investment','digital transformation','hiring growth','leadership change']
+  
+  // For PE-backed / taken-private companies, search investor communications too
+  const peContext = co.stage==='pe'||co.track==='hybrid' ? 
+    `Note: This company is PE-backed or taken private. Search for: investor presentations, annual reports, portfolio company updates from the PE owner, industry analyst coverage (DC Advisory, JLL, CBRE, Green Street), and trade press. These companies often have extensive non-EDGAR public intelligence.` : ''
+
+  const searchPrompt=`You are a company intelligence researcher. Your job is to surface specific, recent, actionable intelligence about this company — not generic descriptions.
 
 Company: ${co.name} ${ticker}
 ${domain?`Website: ${domain}`:''}
-Sector: ${co.sector||'Unknown'}
-Stage: ${co.stage}
+Sector: ${co.sector||'Unknown'} | Stage: ${co.stage}
+${peContext}
 
-Run searches to find:
-1. Recent news and press releases about ${co.name} in the last 30 days
-2. Recent hiring activity, job postings, or leadership changes at ${co.name}
-3. Recent announcements about: ${themeKeywords} at ${co.name}
-4. Any recent funding, acquisitions, partnerships, or strategic announcements
-5. Recent earnings calls or investor presentations (if public)
-${domain?`6. Recent content published on ${domain}`:''}
+Run the following targeted searches and extract findings:
 
-For each search result found, extract:
-- The specific headline or title
-- The date (very important — focus on content from last 60 days, max 12 months)
-- The source (publication name, SEC filing type, job board, etc.)
-- 2-3 sentences of the key information
+SEARCH 1: "${co.name}" news announcements 2025 2026
+SEARCH 2: "${co.name}" hiring jobs leadership appointments 2025
+SEARCH 3: "${co.name}" ${sectorAngles[0]||'technology investment'} ${sectorAngles[1]||'digital transformation'}
+SEARCH 4: "${co.name}" ${sectorAngles[2]||'expansion growth'} ${sectorAngles[3]||'strategic investment'}
+SEARCH 5: "${co.name}" ${themes.slice(0,3).map(t=>t==='tom'?'restructuring transformation':t==='ops'?'operational improvement':t==='data'?'data platform':t==='ai'?'artificial intelligence AI':t).join(' ')}
+${co.ticker?`SEARCH 6: ${co.ticker} investor presentation earnings analyst 2025 2026`:''}
+${co.stage==='pe'||co.track==='hybrid'?`SEARCH 7: "${co.name}" ${co.investors||'private equity'} portfolio investment expansion`:''}
 
-Present all findings as a structured research brief. Be specific about dates and sources. If you cannot find recent information on a specific topic, say so explicitly rather than guessing.`
+For EACH finding, provide:
+- HEADLINE: exact title or headline
+- DATE: specific date (day/month/year) — this is critical for signal recency scoring
+- SOURCE: publication, filing type, or platform
+- DETAIL: 3-4 sentences of specific operational intelligence — what is actually happening, what investment was made, what is being built, who was hired, what was announced
+- SIGNAL TYPE: which theme this relates to (data/ai/automation/tom/cyber/cost/ops)
+
+Focus on: specific named programmes, investment amounts, headcount figures, technology platforms named, partnership details, leadership names and titles.
+Discard: general company descriptions, boilerplate about what the company does, vague statements without specifics.
+Be explicit when a search returns no useful recent results.`
 
   try{
     return await askWithSearch(searchPrompt, 3000)
@@ -120,8 +173,10 @@ ${urlContext}
 Return ONLY a JSON object:
 {"name":"official registered company name","track":"public|private|hybrid","stage":"public|series-b|series-a|seed|private|pe","cik":"SEC CIK with leading zeros or null","ticker":"exchange ticker or null","exchange":"NYSE|NASDAQ|null","sic":"4-digit SIC or null","sicDesc":"SIC description or null","hq":"City, State or null","employees":"approximate e.g. ~5,000 or null","sector":"primary sector description","website":"canonical website domain e.g. sidara.com or null","formDFiled":true|false|null,"formDAmount":"most recent raise e.g. $50m or null","investors":"lead investors if known or null","dataQuality":0-100,"partial":false,"resolutionNote":"2-3 sentences: what was found, the company primary business, any ambiguity or data caveats. If a URL was provided confirm whether it matches the resolved entity."}
 
-dataQuality: 90+=rich EDGAR/public history. 70-89=public with some gaps. 50-69=private with good press coverage. 30-49=limited public signal. <30=very limited.
-hybrid=foreign subsidiary still filing with SEC, or taken-private company.
+dataQuality: 90+=rich EDGAR/public history or major PE-backed company with extensive press coverage. 70-89=public with some gaps OR large PE/taken-private company with good press and investor coverage. 50-69=private with good press coverage. 30-49=limited public signal. <30=very limited.
+hybrid=foreign subsidiary still filing with SEC, OR company taken private by PE (e.g. KKR, Blackstone, Carlyle) that retains significant public presence — these often have MORE signal than listed companies.
+pe=company owned by private equity with institutional backing — dataQuality should reflect actual press/analyst coverage, not just EDGAR availability.
+CRITICAL: Do not set dataQuality low just because a company is not publicly listed. Companies like QTS Realty (Blackstone), CyrusOne (KKR), Switch (DigitalBridge) have extensive public intelligence despite PE ownership.
 IMPORTANT: If the company name is ambiguous and no URL was provided, note this clearly in resolutionNote and set dataQuality lower to reflect uncertainty.`)
 }
 
@@ -164,8 +219,9 @@ Critical rules:
 - Series A caps high→medium; Seed caps high→medium AND medium→low  
 - rawStrength: 90+=named programme with specific dates/amounts in live research; 75-89=clearly evidenced in research; 60-74=credible inferred from research; 45-59=training knowledge; <45=speculative
 - For signals found in live research: set date to the actual article/filing date found
-- Extract 3-6 signals prioritising those with the most recent and specific evidence
-- Return ONLY the JSON array`,3000)
+- Extract 4-8 signals — more for well-researched large companies, fewer for limited signal companies
+- For PE-backed infrastructure companies (data centres, logistics, manufacturing) extract all strong signals found — do not artificially limit
+- Return ONLY the JSON array`,3500)
   const today=new Date('2026-05-01').getTime()
   return sigs.map(s=>{
     const days=Math.round((today-new Date(s.date).getTime())/86400000)
@@ -182,21 +238,25 @@ Critical rules:
 }
 
 async function scoreCompany(co:ResolvedCo,sigs:Signal[]):Promise<Score>{
-  const caps:Record<string,number>={public:100,'series-b':100,'series-a':78,seed:65,private:100,pe:55}
+  const caps:Record<string,number>={public:100,'series-b':100,'series-a':78,seed:65,private:100,pe:100}
   const cap=caps[co.stage?.toLowerCase()||'private']||100
-  const isPriv=co.track==='private'
+  // Hybrid = large company with public footprint, use public model
+  // Pure private with no SEC history uses private model
+  const isPriv=co.track==='private'&&co.stage!=='pe'
   const dimKeys=isPriv?['regulatory','technical','operational','market','founder']:['signal_strength','source_quality','recency','theme_coverage']
   const W=isPriv?{regulatory:.35,technical:.25,operational:.20,market:.15,founder:.05}:{signal_strength:.40,source_quality:.30,recency:.20,theme_coverage:.10}
-  const sigSum=sigs.slice(0,5).map((s,i)=>`${i+1}. [${s.theme}] ${s.label} | adj:${s.adjStrength} | conf:${s.confidence} | tier:${s.recencyTier}`).join('\n')
+  const sigSum=sigs.slice(0,8).map((s,i)=>`${i+1}. [${s.theme}] ${s.label} | adj:${s.adjStrength} | conf:${s.confidence} | tier:${s.recencyTier} | sources:${s.sourceCount}`).join('\n')
   const res=await askJSON<{dimensions:Record<string,number>;scoringRationale:string;themesHit:string[];freshestSignalDays:number}>(`Score this company for outreach readiness using the ${isPriv?'private':'public'} company intelligence model.
 
 Company: ${co.name} | Track: ${co.track} | Stage: ${co.stage} | Data quality: ${co.dataQuality}/100
+${co.stage==='pe'?'NOTE: PE-backed company — score based on actual signal quality, not ownership structure. Large PE-backed infrastructure companies (data centres, logistics, manufacturing) can score 70-90 if the intelligence is strong.':''}
+${co.track==='hybrid'?'NOTE: Hybrid entity — score as you would a large private company with public-equivalent intelligence available.':''}
 
-Top signals:
+Top signals (${sigs.length} total extracted):
 ${sigSum}
 
-Score each dimension 0-100:
-${isPriv?'regulatory=Form D/patents/grants strength\ntechnical=scientific/technical signal depth\noperational=job posting specificity and headcount growth\nmarket=investor quality and press coverage\nfounder=founder public profile and track record':'signal_strength=overall adjusted signal strength\nsource_quality=source independence and quality\nrecency=signal freshness weighting\ntheme_coverage=breadth across the 6 themes'}
+Score each dimension 0-100. Be accurate — a well-documented PE infrastructure company with strong hiring signals and recent press should score 70+, not sub-50.
+${isPriv?'regulatory=Form D/patents/grants/compliance signal strength\ntechnical=scientific/technical signal depth\noperational=job posting specificity, headcount growth, named programmes\nmarket=investor quality, press coverage volume and recency\nfounder=leadership public profile and track record':'signal_strength=overall adjusted signal strength across all ${sigs.length} signals\nsource_quality=source independence, credibility, and diversity\nrecency=signal freshness — live/recent tier signals score higher\ntheme_coverage=breadth across the selected themes'}
 
 Return JSON: {"dimensions":{${dimKeys.map(k=>`"${k}":0`).join(',')}},"scoringRationale":"2-3 sentences explaining the score specifically for THIS company","themesHit":["theme ids with genuine signal"],"freshestSignalDays":integer}
 Return ONLY JSON.`)
@@ -211,7 +271,7 @@ Return ONLY JSON.`)
 }
 
 async function mapStakeholders(co:ResolvedCo,sigs:Signal[],sc:Score):Promise<Role[]>{
-  const isPriv=co.track==='private'
+  const isPriv=co.track==='private'&&co.stage!=='pe'
   const topSigs=sigs.slice(0,5).map(s=>`- [${s.theme.toUpperCase()}] ${s.label} (${s.confidence}, ${s.recencyTier})`).join('\n')
   const acts=isPriv?'founder_direct, first_outreach_target, technical_owner_to_validate, conditional_target':'first_outreach_target, technical_owner_to_validate, executive_sponsor_to_map, operational_owner, capability_builder, compliance_stakeholder, conditional_target'
   return askJSON<Role[]>(`You are a specialist recruiter and BD advisor. Map stakeholder roles for outreach grounded in the specific signals detected.
@@ -280,7 +340,11 @@ export default function App(){
     setScanId(id);setScanThemes(themes)
     const init:ScannedCo[]=cos.map((c,i)=>({id:`co-${i}`,input:c,status:'pending'}))
     setCompanies(init);setActive('companies')
-    for(const co of init){
+    for(let ci=0;ci<init.length;ci++){
+      // Stagger company processing to stay within rate limits
+      // After every 3rd company, add a longer pause
+      if(ci>0) await sleep(ci%3===0?5000:2000)
+      const co=init[ci]
       try{
         // F02: Resolve company identity
         updateCo(co.id,{status:'resolving'})
