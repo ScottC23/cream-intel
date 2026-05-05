@@ -343,8 +343,8 @@ export default function App(){
     // Process companies sequentially through server-side pipeline
     // Each company = 1 request to /api/pipeline (which handles all steps server-side)
     for(let ci=0;ci<init.length;ci++){
-      // Stagger: 6s between companies to stay within rate limits
-      if(ci>0) await sleep(6000)
+      // Small stagger between companies
+      if(ci>0) await sleep(3000)
       const co=init[ci]
       try{
         updateCo(co.id,{status:'researching' as ScannedCo['status']})
@@ -501,7 +501,7 @@ function ScanView({onScan,hasScan,scanId,companies}:{onScan:(cos:ParsedCo[],them
           <div key={co.id} className="proc-row">
             <div className="proc-dot" style={{background:co.status==='done'?'var(--green)':co.status==='error'?'var(--red)':'var(--camel-500)',boxShadow:co.status!=='done'&&co.status!=='error'&&co.status!=='pending'?'0 0 8px rgba(184,150,106,.6)':'none'}}/>
             <div className="proc-name">{co.resolved?.name||co.input.value}</div>
-            <div className="proc-status">{co.status==='pending'?'waiting…':co.status==='researching'?'researching — resolving, searching, scoring…':co.status==='done'?`score ${co.score?.final} · grade ${co.score?.grade}`:co.error||'error'}</div>
+            <div className="proc-status">{co.status==='pending'?'waiting…':co.status==='researching'?'researching…':co.status==='done'?`score ${co.score?.final} · grade ${co.score?.grade}`:co.error?`error: ${co.error.slice(0,40)}`:'error'}</div>
             {co.score&&<div className={`gc ${co.score.grade==='A'?'ga':co.score.grade==='B'?'gb':co.score.grade==='C'?'gc2':'gd'}`}>{co.score.grade}</div>}
           </div>
         ))}

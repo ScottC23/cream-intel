@@ -1,0 +1,10 @@
+{
+  "functions": {
+    "src/app/api/pipeline/route.ts": {
+      "maxDuration": 300
+    },
+    "src/app/api/generate/route.ts": {
+      "maxDuration": 60
+    }
+  }
+}

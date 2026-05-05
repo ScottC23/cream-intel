@@ -38,7 +38,7 @@ async function callClaude(
 
     if (r.status === 429) {
       // Exponential backoff: 10s, 20s, 40s, 60s
-      const wait = Math.min(10000 * Math.pow(2, attempt), 60000)
+      const wait = Math.min(5000 * Math.pow(2, attempt), 30000)
       console.warn(`Rate limited (429) attempt ${attempt + 1}/${retries}, waiting ${wait / 1000}s`)
       await sleep(wait)
       continue
@@ -46,7 +46,7 @@ async function callClaude(
 
     if (r.status === 529) {
       // Overloaded — same backoff
-      const wait = Math.min(15000 * Math.pow(2, attempt), 60000)
+      const wait = Math.min(5000 * Math.pow(2, attempt), 30000)
       await sleep(wait)
       continue
     }
@@ -112,11 +112,11 @@ Return ONLY JSON:
 dataQuality: 90+=rich EDGAR or major PE-backed company with extensive press. 70-89=public with gaps OR large PE company. 50-69=private good coverage. 30-49=limited. <30=very limited.
 PE-backed companies (KKR, Blackstone, etc.) often have 70-90 dataQuality despite not being listed.`
 
-    const resolvedRaw = await callClaude(resolvePrompt, 800)
+    const resolvedRaw = await callClaude(resolvePrompt, 600)
     const resolved = parseJSON<Record<string, unknown>>(resolvedRaw)
 
     // Small delay between steps
-    await sleep(2000)
+    await sleep(500)
 
     // ── STEP 2: Research (web search) ─────────────────────────────
     const coName = resolved.name as string || value
@@ -172,7 +172,7 @@ If a search returns nothing useful, state that explicitly.`
       liveResearch = ''
     }
 
-    await sleep(2000)
+    await sleep(500)
 
     // ── STEP 3: Extract signals ────────────────────────────────────
     const liveSection = liveResearch.trim().length > 100
@@ -227,7 +227,7 @@ Rules:
     }).filter(s => s.recencyTier !== 'excluded' || s.adjStrength >= 36)
       .sort((a, b) => b.adjStrength - a.adjStrength)
 
-    await sleep(2000)
+    await sleep(500)
 
     // ── STEP 4: Score ──────────────────────────────────────────────
     const caps: Record<string, number> = { public: 100, 'series-b': 100, 'series-a': 78, seed: 65, private: 100, pe: 100 }
@@ -259,7 +259,7 @@ ${isPriv
 Return JSON: {"dimensions":{${dimKeys.map(k => `"${k}":0`).join(',')}},"scoringRationale":"2-3 sentences specific to this company — what drives the score, what is strong, what is limited","themesHit":["theme ids with genuine signal"],"freshestSignalDays":integer}
 Return ONLY JSON.`
 
-    const scoreRaw = await callClaude(scorePrompt, 800)
+    const scoreRaw = await callClaude(scorePrompt, 600)
     const scoreResult = parseJSON<Record<string, unknown>>(scoreRaw)
 
     const highConf = signals.filter(s => s.confidence === 'high').length
