@@ -35,7 +35,7 @@ async function ask(prompt:string,maxT=2000,retries=3):Promise<string>{
       const r=await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({messages:[{role:'user',content:prompt}],max_tokens:maxT})})
       if(r.status===429){
         // Rate limited — wait with exponential backoff then retry
-        const wait=[8000,16000,32000][attempt]||32000
+        const wait=[15000,30000,60000][attempt]||60000
         console.warn(`Rate limited (429), waiting ${wait/1000}s before retry ${attempt+1}/${retries}`)
         await sleep(wait)
         continue
@@ -65,7 +65,7 @@ async function askWithSearch(prompt:string,maxT=3000,retries=3):Promise<string>{
       body:JSON.stringify({messages:[{role:'user',content:prompt}],max_tokens:maxT,use_web_search:true})
     })
     if(r.status===429){
-      const wait=[10000,20000,40000][attempt]||40000
+      const wait=[20000,40000,60000][attempt]||60000
       console.warn(`Search rate limited (429), waiting ${wait/1000}s`)
       await sleep(wait)
       continue
@@ -340,28 +340,30 @@ export default function App(){
     setScanId(id);setScanThemes(themes)
     const init:ScannedCo[]=cos.map((c,i)=>({id:`co-${i}`,input:c,status:'pending'}))
     setCompanies(init);setActive('companies')
+    // Process companies sequentially through server-side pipeline
+    // Each company = 1 request to /api/pipeline (which handles all steps server-side)
     for(let ci=0;ci<init.length;ci++){
-      // Stagger company processing to stay within rate limits
-      // After every 3rd company, add a longer pause
-      if(ci>0) await sleep(ci%3===0?5000:2000)
+      // Stagger: 6s between companies to stay within rate limits
+      if(ci>0) await sleep(6000)
       const co=init[ci]
       try{
-        // F02: Resolve company identity
-        updateCo(co.id,{status:'resolving'})
-        const resolved=await resolveCompany(co.input.value,co.input.type,co.input.url)
-        updateCo(co.id,{resolved,status:'researching' as ScannedCo['status']})
-
-        // F03: Live web research — searches last 30-60 days
-        const liveResearch=await researchCompany(resolved,themes,co.input.url)
-
-        // F04: Extract signals from live research + training knowledge
-        updateCo(co.id,{status:'extracting'})
-        const sigs=await extractSignals(resolved,themes,co.input.url,liveResearch)
-        updateCo(co.id,{signals:sigs,status:'scoring'})
-
-        // F05: Score
-        const sc=await scoreCompany(resolved,sigs)
-        updateCo(co.id,{score:sc,status:'done'})
+        updateCo(co.id,{status:'researching' as ScannedCo['status']})
+        const r=await fetch('/api/pipeline',{
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({company:co.input,themes})
+        })
+        if(!r.ok){
+          const err=await r.json().catch(()=>({}))
+          throw new Error(err.error||`Pipeline error ${r.status}`)
+        }
+        const result=await r.json()
+        updateCo(co.id,{
+          resolved:result.resolved,
+          signals:result.signals,
+          score:result.score,
+          status:'done'
+        })
       }catch(e){updateCo(co.id,{status:'error',error:e instanceof Error?e.message:'Processing failed'})}
     }
   }
@@ -499,7 +501,7 @@ function ScanView({onScan,hasScan,scanId,companies}:{onScan:(cos:ParsedCo[],them
           <div key={co.id} className="proc-row">
             <div className="proc-dot" style={{background:co.status==='done'?'var(--green)':co.status==='error'?'var(--red)':'var(--camel-500)',boxShadow:co.status!=='done'&&co.status!=='error'&&co.status!=='pending'?'0 0 8px rgba(184,150,106,.6)':'none'}}/>
             <div className="proc-name">{co.resolved?.name||co.input.value}</div>
-            <div className="proc-status">{co.status==='pending'?'waiting…':co.status==='resolving'?'resolving company…':co.status==='researching'?'searching news and filings…':co.status==='extracting'?'extracting signals…':co.status==='scoring'?'scoring evidence…':co.status==='done'?`score ${co.score?.final} · grade ${co.score?.grade}`:co.error||'error'}</div>
+            <div className="proc-status">{co.status==='pending'?'waiting…':co.status==='researching'?'researching — resolving, searching, scoring…':co.status==='done'?`score ${co.score?.final} · grade ${co.score?.grade}`:co.error||'error'}</div>
             {co.score&&<div className={`gc ${co.score.grade==='A'?'ga':co.score.grade==='B'?'gb':co.score.grade==='C'?'gc2':'gd'}`}>{co.score.grade}</div>}
           </div>
         ))}
@@ -582,7 +584,7 @@ function ScanView({onScan,hasScan,scanId,companies}:{onScan:(cos:ParsedCo[],them
         </div>
       </div>
       <div className="cfoot">
-        <span className="fhint2">{cos.length} {cos.length===1?'company':'companies'} · {themes.size} {themes.size===1?'theme':'themes'} · est. {cos.length*35}s (includes live research)</span>
+        <span className="fhint2">{cos.length} {cos.length===1?'company':'companies'} · {themes.size} {themes.size===1?'theme':'themes'} · est. {Math.round(cos.length*45/60)} min (sequential with rate limiting)</span>
         <button className="btn-camel" onClick={handleCreate} disabled={scanning}>{scanning?'creating scan…':'create scan →'}</button>
       </div>
     </div>
