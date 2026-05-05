@@ -6,7 +6,7 @@ export async function POST(req: NextRequest) {
     const {
       messages,
       max_tokens = 2000,
-      model = 'claude-sonnet-4-20250514',
+      model = 'claude-haiku-4-5-20251001',
       system,
       use_web_search = false
     } = body
