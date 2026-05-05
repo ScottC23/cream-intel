@@ -17,7 +17,7 @@ interface Score{model:string;dimensions:Record<string,number>;highConfBonus:numb
 interface Role{title:string;department:string;priority:string;action:string;actionLabel:string;score:number;whyMatters:string;howToUse:string;evidenceConf:string;evidenceConfNote:string;inferenceRisk:string;inferenceRiskNote:string;inferenceNote?:string;topics:{text:string;tag:string}[];firstQuestion:string}
 interface Angle{hypothesis:string;triggerEvent:string;evidenceChain:string[];approachRationale:string}
 interface EmailDraft{subject:string;body:string}
-interface ScannedCo{id:string;input:ParsedCo;resolved?:ResolvedCo;signals?:Signal[];score?:Score;roles?:Role[];status:'pending'|'resolving'|'extracting'|'scoring'|'done'|'error';error?:string}
+interface ScannedCo{id:string;input:ParsedCo;resolved?:ResolvedCo;signals?:Signal[];score?:Score;roles?:Role[];status:'pending'|'resolving'|'researching'|'extracting'|'scoring'|'done'|'error';error?:string}
 
 /* ═══ HELPERS ═══ */
 function scoreColor(n:number){return n>=65?'var(--green)':n>=45?'var(--amber)':'var(--red)'}
@@ -37,6 +37,71 @@ async function askJSON<T>(prompt:string,maxT=2000):Promise<T>{
   const txt=await ask(prompt,maxT)
   const clean=txt.replace(/```json\n?|\n?```/g,'').trim()
   try{return JSON.parse(clean) as T}catch{const m=clean.match(/\{[\s\S]*\}|\[[\s\S]*\]/);if(m)return JSON.parse(m[0]) as T;throw new Error('JSON parse failed')}
+}
+
+// Web search — calls API with search tool enabled, extracts all text from response
+async function askWithSearch(prompt:string,maxT=3000):Promise<string>{
+  const r=await fetch('/api/generate',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({messages:[{role:'user',content:prompt}],max_tokens:maxT,use_web_search:true})
+  })
+  if(!r.ok)throw new Error(`Search API ${r.status}`)
+  const d=await r.json()
+  // Extract text from all content blocks (text + tool results)
+  const parts:string[]=[]
+  for(const b of (d.content||[])){
+    if(b.type==='text'&&b.text)parts.push(b.text)
+    if(b.type==='tool_result'){
+      for(const c of (b.content||[])){if(c.type==='text'&&c.text)parts.push(c.text)}
+    }
+  }
+  return parts.join('\n\n')
+}
+
+// Research a company using live web search — runs multiple targeted searches
+async function researchCompany(co:ResolvedCo,themes:string[],inputUrl?:string):Promise<string>{
+  const domain=co.website||inputUrl||''
+  const ticker=co.ticker?`(${co.ticker})`:'  '
+  const themeKeywords=themes.map(t=>({
+    data:'data platform engineering analytics',
+    ai:'AI artificial intelligence machine learning',
+    automation:'automation robotics RPA process',
+    tom:'restructuring transformation operating model leadership',
+    cyber:'cybersecurity CISO security investment',
+    cost:'cost reduction efficiency restructure margin',
+    ops:'operational improvement supply chain ERP performance',
+  }[t]||t)).join(' OR ')
+
+  const searchPrompt=`You are a company intelligence researcher. Search for recent news, developments, and signals about this company from the last 30-60 days.
+
+Company: ${co.name} ${ticker}
+${domain?`Website: ${domain}`:''}
+Sector: ${co.sector||'Unknown'}
+Stage: ${co.stage}
+
+Run searches to find:
+1. Recent news and press releases about ${co.name} in the last 30 days
+2. Recent hiring activity, job postings, or leadership changes at ${co.name}
+3. Recent announcements about: ${themeKeywords} at ${co.name}
+4. Any recent funding, acquisitions, partnerships, or strategic announcements
+5. Recent earnings calls or investor presentations (if public)
+${domain?`6. Recent content published on ${domain}`:''}
+
+For each search result found, extract:
+- The specific headline or title
+- The date (very important — focus on content from last 60 days, max 12 months)
+- The source (publication name, SEC filing type, job board, etc.)
+- 2-3 sentences of the key information
+
+Present all findings as a structured research brief. Be specific about dates and sources. If you cannot find recent information on a specific topic, say so explicitly rather than guessing.`
+
+  try{
+    return await askWithSearch(searchPrompt, 3000)
+  }catch(e){
+    console.warn('Web search failed, falling back to knowledge-only mode:', e)
+    return ''
+  }
 }
 
 /* ═══ INTELLIGENCE PIPELINE ═══ */
@@ -60,15 +125,29 @@ hybrid=foreign subsidiary still filing with SEC, or taken-private company.
 IMPORTANT: If the company name is ambiguous and no URL was provided, note this clearly in resolutionNote and set dataQuality lower to reflect uncertainty.`)
 }
 
-async function extractSignals(co:ResolvedCo,themes:string[],inputUrl?:string):Promise<Signal[]>{
+async function extractSignals(co:ResolvedCo,themes:string[],inputUrl?:string,liveResearch?:string):Promise<Signal[]>{
   const themeDesc:Record<string,string>={data:'Data capability: data infrastructure, platforms, engineering, analytics, data lakes, data mesh, real-time data, MDM',ai:'AI readiness: AI strategy, machine learning, generative AI, LLMs, AI platforms, ML engineering, AI-driven products',automation:'Automation: RPA, manufacturing automation, industrial robots, workflow automation, autonomous systems, IIoT',tom:'Operating model change: restructuring, digital transformation, operating model redesign, workforce change, new leadership, post-merger integration',cyber:'Cyber resilience: cybersecurity investment, security transformation, zero trust, incident response, CISO appointment, SOC',cost:'Cost transformation: cost reduction, opex reduction, efficiency, margin improvement, workforce restructure with capability focus',ops:'Operational improvement: operational excellence, process improvement, supply chain, ERP, digital operations, performance programmes'}
   const selected=themes.map(t=>`- ${t}: ${themeDesc[t]||t}`).join('\n')
-  const sigs=await askJSON<{theme:string;label:string;rawStrength:number;date:string;sourceType:string;sourceCount:number;sourceTypes:string[];confidence:string;excerpt:string}[]>(`You are a senior intelligence analyst at a specialist recruitment and BD firm. Your role is to extract enterprise-grade signals about strategic investments, operational changes, and capability gaps — signals that indicate hiring needs and consulting opportunities.
+  const liveSection=liveResearch&&liveResearch.trim().length>50?`
+═══════════════════════════════════════
+LIVE RESEARCH BRIEF (web-searched, last 60 days)
+Use this as your PRIMARY source of evidence. These are real, recent findings.
+Treat dates, sources, and specifics from this section as confirmed evidence.
+═══════════════════════════════════════
+${liveResearch}
+═══════════════════════════════════════
+END LIVE RESEARCH — now extract signals from the above
+═══════════════════════════════════════
+`:`[No live research available — extract signals from your training knowledge, marking as lower confidence]`
+
+  const sigs=await askJSON<{theme:string;label:string;rawStrength:number;date:string;sourceType:string;sourceCount:number;sourceTypes:string[];confidence:string;excerpt:string}[]>(`You are a senior intelligence analyst at a specialist recruitment and BD firm. Extract enterprise-grade intelligence signals grounded in the live research brief provided below.
 
 Company: ${co.name} | Track: ${co.track} | Stage: ${co.stage} | Sector: ${co.sector||'Unknown'}
 ${co.cik?`CIK: ${co.cik}`:''}${co.ticker?` | Ticker: ${co.ticker}`:''}
 ${co.website?`Website: ${co.website}`:inputUrl?`Input URL: ${inputUrl}`:''}
 Today: 2026-05-01
+
+${liveSection}
 
 Extract signals across these themes:
 ${selected}
@@ -79,12 +158,14 @@ Return JSON array. Each object:
 {"theme":"data|ai|automation|tom|cyber|cost|ops","label":"SPECIFIC factual label naming the actual programme/event/date e.g. 'Lincoln Electric launches AI welding optimisation platform January 2026' NOT 'AI investment'","rawStrength":40-95,"date":"YYYY-MM-DD of most recent evidence","sourceType":"evidence|inferred|speculative","sourceCount":1-5,"sourceTypes":["SEC 10-K","earnings call","press release","job postings","investor presentation","news","Form D","USPTO patent","conference"],"confidence":"high|medium|low","excerpt":"2-3 sentences of SPECIFIC factual intelligence. Name programmes, percentages, dollar amounts, dates. Be precise about what the signal means operationally."}
 
 Critical rules:
-- Only extract where you have genuine knowledge — never fabricate
-- evidence=confirmed by verifiable public source; inferred=reasonable from known facts; speculative=possible from industry pattern
-- Series A caps high→medium; Seed caps high→medium AND medium→low
-- rawStrength: 85+=specific named programme confirmed investment; 70-84=strong corroborated; 50-69=credible inferred; <50=speculative
-- Prioritise 2025-2026 signals. If limited knowledge, extract 2-3 high-quality signals not many weak ones.
-- Return ONLY the JSON array`,2000)
+- LIVE RESEARCH IS YOUR PRIMARY SOURCE — extract signals grounded in the research brief above first
+- Evidence from the live research brief = "evidence" sourceType; things you can infer from it = "inferred"; training knowledge only = "speculative"
+- Never fabricate — if the research brief doesn't confirm something, mark it appropriately
+- Series A caps high→medium; Seed caps high→medium AND medium→low  
+- rawStrength: 90+=named programme with specific dates/amounts in live research; 75-89=clearly evidenced in research; 60-74=credible inferred from research; 45-59=training knowledge; <45=speculative
+- For signals found in live research: set date to the actual article/filing date found
+- Extract 3-6 signals prioritising those with the most recent and specific evidence
+- Return ONLY the JSON array`,3000)
   const today=new Date('2026-05-01').getTime()
   return sigs.map(s=>{
     const days=Math.round((today-new Date(s.date).getTime())/86400000)
@@ -201,11 +282,20 @@ export default function App(){
     setCompanies(init);setActive('companies')
     for(const co of init){
       try{
+        // F02: Resolve company identity
         updateCo(co.id,{status:'resolving'})
         const resolved=await resolveCompany(co.input.value,co.input.type,co.input.url)
-        updateCo(co.id,{resolved,status:'extracting'})
-        const sigs=await extractSignals(resolved,themes,co.input.url)
+        updateCo(co.id,{resolved,status:'researching' as ScannedCo['status']})
+
+        // F03: Live web research — searches last 30-60 days
+        const liveResearch=await researchCompany(resolved,themes,co.input.url)
+
+        // F04: Extract signals from live research + training knowledge
+        updateCo(co.id,{status:'extracting'})
+        const sigs=await extractSignals(resolved,themes,co.input.url,liveResearch)
         updateCo(co.id,{signals:sigs,status:'scoring'})
+
+        // F05: Score
         const sc=await scoreCompany(resolved,sigs)
         updateCo(co.id,{score:sc,status:'done'})
       }catch(e){updateCo(co.id,{status:'error',error:e instanceof Error?e.message:'Processing failed'})}
@@ -343,9 +433,9 @@ function ScanView({onScan,hasScan,scanId,companies}:{onScan:(cos:ParsedCo[],them
       <div style={{display:'flex',flexDirection:'column',gap:4,maxWidth:700}}>
         {companies.map(co=>(
           <div key={co.id} className="proc-row">
-            <div className="proc-dot" style={{background:co.status==='done'?'var(--green)':co.status==='error'?'var(--red)':'var(--camel-500)'}}/>
+            <div className="proc-dot" style={{background:co.status==='done'?'var(--green)':co.status==='error'?'var(--red)':'var(--camel-500)',boxShadow:co.status!=='done'&&co.status!=='error'&&co.status!=='pending'?'0 0 8px rgba(184,150,106,.6)':'none'}}/>
             <div className="proc-name">{co.resolved?.name||co.input.value}</div>
-            <div className="proc-status">{co.status==='pending'?'waiting…':co.status==='resolving'?'resolving…':co.status==='extracting'?'extracting signals…':co.status==='scoring'?'scoring…':co.status==='done'?`score ${co.score?.final} · grade ${co.score?.grade}`:co.error||'error'}</div>
+            <div className="proc-status">{co.status==='pending'?'waiting…':co.status==='resolving'?'resolving company…':co.status==='researching'?'searching news and filings…':co.status==='extracting'?'extracting signals…':co.status==='scoring'?'scoring evidence…':co.status==='done'?`score ${co.score?.final} · grade ${co.score?.grade}`:co.error||'error'}</div>
             {co.score&&<div className={`gc ${co.score.grade==='A'?'ga':co.score.grade==='B'?'gb':co.score.grade==='C'?'gc2':'gd'}`}>{co.score.grade}</div>}
           </div>
         ))}
@@ -428,7 +518,7 @@ function ScanView({onScan,hasScan,scanId,companies}:{onScan:(cos:ParsedCo[],them
         </div>
       </div>
       <div className="cfoot">
-        <span className="fhint2">{cos.length} {cos.length===1?'company':'companies'} · {themes.size} {themes.size===1?'theme':'themes'} · est. {cos.length*25}s</span>
+        <span className="fhint2">{cos.length} {cos.length===1?'company':'companies'} · {themes.size} {themes.size===1?'theme':'themes'} · est. {cos.length*35}s (includes live research)</span>
         <button className="btn-camel" onClick={handleCreate} disabled={scanning}>{scanning?'creating scan…':'create scan →'}</button>
       </div>
     </div>
