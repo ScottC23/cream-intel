@@ -27,7 +27,8 @@ async function callClaude(
     'x-api-key': key,
     'anthropic-version': '2023-06-01',
   }
-  if (useWebSearch) headers['anthropic-beta'] = 'web-search-2025-03-05'
+  // Note: web search tool may not need beta header on current API version
+  // if (useWebSearch) headers['anthropic-beta'] = 'web-search-2025-03-05'
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     const r = await fetch('https://api.anthropic.com/v1/messages', {
@@ -51,6 +52,15 @@ async function callClaude(
       continue
     }
 
+    if (r.status === 400) {
+      const err = await r.json().catch(() => ({}))
+      // 400 on web search often means the tool format is rejected — disable search and retry
+      if (useWebSearch) {
+        console.warn('Web search 400, retrying without search:', JSON.stringify(err))
+        return callClaude(prompt, maxTokens, false, 1)
+      }
+      throw new Error(`API 400: ${JSON.stringify(err)}`)
+    }
     if (!r.ok) {
       const err = await r.json().catch(() => ({}))
       throw new Error(`Anthropic API ${r.status}: ${JSON.stringify(err)}`)
@@ -166,9 +176,10 @@ If a search returns nothing useful, state that explicitly.`
 
     let liveResearch = ''
     try {
-      liveResearch = await callClaude(researchPrompt, 2500, true)
+      liveResearch = await callClaude(researchPrompt, 2000, true)
+      console.log('Research completed, length:', liveResearch.length)
     } catch (e) {
-      console.warn('Web search failed:', e)
+      console.warn('Web search step failed, continuing without live research:', e)
       liveResearch = ''
     }
 

@@ -348,21 +348,30 @@ export default function App(){
       const co=init[ci]
       try{
         updateCo(co.id,{status:'researching' as ScannedCo['status']})
-        const r=await fetch('/api/pipeline',{
-          method:'POST',
-          headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({company:co.input,themes})
-        })
+        // 270s timeout — slightly under Vercel's 300s function limit
+        const controller=new AbortController()
+        const timeout=setTimeout(()=>controller.abort(),270000)
+        let r:Response
+        try{
+          r=await fetch('/api/pipeline',{
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({company:co.input,themes}),
+            signal:controller.signal
+          })
+        }finally{clearTimeout(timeout)}
         if(!r.ok){
           const err=await r.json().catch(()=>({}))
           throw new Error(err.error||`Pipeline error ${r.status}`)
         }
         const result=await r.json()
+        if(!result.resolved)throw new Error('No data returned from pipeline')
         updateCo(co.id,{
           resolved:result.resolved,
-          signals:result.signals,
+          signals:result.signals||[],
           score:result.score,
-          status:'done'
+          status:result.score?'done':'error',
+          error:result.score?undefined:'Scoring incomplete'
         })
       }catch(e){updateCo(co.id,{status:'error',error:e instanceof Error?e.message:'Processing failed'})}
     }
