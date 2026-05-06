@@ -17,7 +17,7 @@ async function claude(prompt: string, maxTokens: number): Promise<string> {
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
-        model: 'claude-haiku-4-5-20251001',
+        model: 'claude-sonnet-4-6',
         max_tokens: maxTokens,
         messages: [{ role: 'user', content: prompt }],
       }),
@@ -44,12 +44,24 @@ async function claude(prompt: string, maxTokens: number): Promise<string> {
 }
 
 function parseJSON<T>(txt: string): T {
-  const clean = txt.replace(/```json\n?|\n?```/g, '').trim()
+  // Strip markdown fences
+  let clean = txt.replace(/```json\n?|\n?```/g, '').replace(/```\n?/g, '').trim()
+  // Remove any leading text before first { or [
+  const firstBrace = clean.search(/[{[]/)
+  if (firstBrace > 0) clean = clean.slice(firstBrace)
+  // Remove any trailing text after last } or ]
+  const lastBrace = Math.max(clean.lastIndexOf('}'), clean.lastIndexOf(']'))
+  if (lastBrace > 0) clean = clean.slice(0, lastBrace + 1)
   try { return JSON.parse(clean) as T }
-  catch {
+  catch (e1) {
+    // Try to find JSON within the text
     const m = clean.match(/\{[\s\S]*\}|\[[\s\S]*\]/)
-    if (m) return JSON.parse(m[0]) as T
-    throw new Error('JSON parse failed: ' + clean.slice(0, 200))
+    if (m) {
+      try { return JSON.parse(m[0]) as T }
+      catch {}
+    }
+    console.error('JSON parse failed. Raw text:', clean.slice(0, 400))
+    throw new Error('JSON parse failed: ' + String(e1) + ' | Text: ' + clean.slice(0, 100))
   }
 }
 
@@ -97,7 +109,7 @@ JSON fields:
 dataQuality guide: 90+=major public company or large PE-backed with rich press coverage. 70-89=public with gaps or large PE company. 50-69=private with decent coverage. 30-49=limited signal. <30=very limited.
 PE-backed companies (KKR, Blackstone etc.) can score 70-90 even if not listed.
 
-Return ONLY the JSON object, no other text.`
+Return ONLY the JSON object. No markdown. No explanation. Start with { and end with }.`
 
     const resolvedTxt = await claude(resolvePrompt, 600)
     const resolved = parseJSON<Record<string, unknown>>(resolvedTxt)
@@ -142,7 +154,7 @@ Rules:
 - Extract 3-6 signals
 - Return ONLY the JSON array`
 
-    const sigsTxt = await claude(extractPrompt, 2000)
+    const sigsTxt = await claude(extractPrompt, 2500)
     type RawSig = { theme: string; label: string; rawStrength: number; date: string; sourceType: string; sourceCount: number; sourceTypes: string[]; confidence: string; excerpt: string }
     const rawSigs = parseJSON<RawSig[]>(sigsTxt)
 
@@ -196,13 +208,8 @@ ${isPriv
       ? 'regulatory=regulatory/legal signal strength\ntechnical=technical/scientific depth\noperational=job specificity and headcount\nmarket=investor quality and press\nfounder=leadership profile'
       : 'signal_strength=overall adjusted signal strength\nsource_quality=source independence and credibility\nrecency=signal freshness\ntheme_coverage=breadth across themes'}
 
-Return ONLY this JSON:
-{
-  "dimensions": {${dimKeys.map(k => `"${k}": 0`).join(', ')}},
-  "scoringRationale": "2-3 sentences specific to this company",
-  "themesHit": ["array of theme ids with genuine signal"],
-  "freshestSignalDays": 0
-}`
+Return ONLY valid JSON with no other text, no markdown, no explanation:
+{"dimensions":{${dimKeys.map(k => `"${k}":0`).join(',')}},"scoringRationale":"rationale here","themesHit":[],"freshestSignalDays":0}`
 
     const scoreTxt = await claude(scorePrompt, 600)
     const scoreData = parseJSON<{ dimensions: Record<string, number>; scoringRationale: string; themesHit: string[]; freshestSignalDays: number }>(scoreTxt)
